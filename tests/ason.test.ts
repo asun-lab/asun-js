@@ -365,3 +365,49 @@ describe('format validation', () => {
     expect(decoded).toEqual(rows);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Field names with special characters (+, -, _)
+// ---------------------------------------------------------------------------
+
+describe('field names with special characters', () => {
+  it('decodes field names with + and -', () => {
+    const text = '{a+b:int, c-d:str}:(42,hello)';
+    const out = decode(text) as Record<string, unknown>;
+    expect(out['a+b']).toBe(42);
+    expect(out['c-d']).toBe('hello');
+  });
+
+  it('decodes field names with underscore', () => {
+    const text = '{user_name:str, is_active:bool}:(Alice,true)';
+    const out = decode(text) as Record<string, unknown>;
+    expect(out['user_name']).toBe('Alice');
+    expect(out['is_active']).toBe(true);
+  });
+
+  it('encode/decode roundtrip with underscore field names', () => {
+    const obj = { user_name: 'Alice', is_active: true };
+    const text = encode(obj, '{user_name:str, is_active:bool}');
+    expect(text).toContain('user_name');
+    expect(text).toContain('is_active');
+    expect(decode(text)).toEqual(obj);
+  });
+
+  it('encode/decode roundtrip with + and - in field names', () => {
+    const obj = { 'a+b': 42, 'c-d': 'hello' };
+    const text = encode(obj, '{a+b:int, c-d:str}');
+    expect(text).toContain('a+b');
+    expect(text).toContain('c-d');
+    expect(decode(text)).toEqual(obj);
+  });
+
+  it('array roundtrip with special field names', () => {
+    const rows = [
+      { 'x+y': 1, 'a-b': 'one' },
+      { 'x+y': 2, 'a-b': 'two' },
+    ];
+    const text = encode(rows, '[{x+y:int, a-b:str}]');
+    expect(text).toContain('x+y');
+    expect(decode(text)).toEqual(rows);
+  });
+});

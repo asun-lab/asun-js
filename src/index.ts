@@ -53,8 +53,19 @@ for (const ch of [',', '(', ')', '[', ']', '"', '\\']) {
 // Schema parsing
 // ---------------------------------------------------------------------------
 
+// Schema cache — avoid reparsing the same schema string
+const _schemaCache = new Map<string, ParsedSchema>();
+
 /** Parse a schema string like "{id:int, name:str}" or "[{id:int}]". */
 function parseSchema(schema: string): ParsedSchema {
+  const cached = _schemaCache.get(schema);
+  if (cached) return cached;
+  const result = parseSchemaInner(schema);
+  _schemaCache.set(schema, result);
+  return result;
+}
+
+function parseSchemaInner(schema: string): ParsedSchema {
   let pos = 0;
   const n = schema.length;
 
@@ -131,7 +142,7 @@ function parseSchema(schema: string): ParsedSchema {
 
 function needsQuoting(s: string): boolean {
   if (s.length === 0) return true;
-  if (s === 'true' || s === 'false') return true;
+  if (s.length <= 5 && (s === 'true' || s === 'false')) return true;
   if (s[0] === ' ' || s[s.length - 1] === ' ') return true;
   let couldBeNum = true;
   const numStart = s[0] === '-' ? 1 : 0;
@@ -145,16 +156,21 @@ function needsQuoting(s: string): boolean {
 }
 
 function quoteStr(s: string): string {
-  let out = '"';
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
-    if (c === '"') out += '\\"';
-    else if (c === '\\') out += '\\\\';
-    else if (c === '\n') out += '\\n';
-    else if (c === '\t') out += '\\t';
-    else out += c;
+  const parts: string[] = ['"'];
+  let i = 0;
+  while (i < s.length) {
+    const run = i;
+    while (i < s.length && s[i] !== '"' && s[i] !== '\\' && s[i] !== '\n' && s[i] !== '\t') i++;
+    if (i > run) parts.push(s.slice(run, i));
+    if (i >= s.length) break;
+    const c = s[i++];
+    if (c === '"') parts.push('\\"');
+    else if (c === '\\') parts.push('\\\\');
+    else if (c === '\n') parts.push('\\n');
+    else if (c === '\t') parts.push('\\t');
   }
-  return out + '"';
+  parts.push('"');
+  return parts.join('');
 }
 
 function encodeStr(s: string): string {
@@ -589,18 +605,29 @@ class Decoder {
     let neg = false;
     if (s[this.pos] === '-') { neg = true; this.pos++; }
     const start = this.pos;
-    while (this.pos < s.length && s[this.pos] >= '0' && s[this.pos] <= '9') this.pos++;
+    let v = 0;
+    while (this.pos < s.length) {
+      const c = s.charCodeAt(this.pos);
+      if (c < 48 || c > 57) break;
+      v = v * 10 + (c - 48);
+      this.pos++;
+    }
     if (this.pos === start) this.err('invalid int');
-    const v = parseInt(s.slice(start, this.pos), 10);
     return neg ? -v : v;
   }
 
   parseUint(): number {
     const s = this.src;
     const start = this.pos;
-    while (this.pos < s.length && s[this.pos] >= '0' && s[this.pos] <= '9') this.pos++;
+    let v = 0;
+    while (this.pos < s.length) {
+      const c = s.charCodeAt(this.pos);
+      if (c < 48 || c > 57) break;
+      v = v * 10 + (c - 48);
+      this.pos++;
+    }
     if (this.pos === start) this.err('invalid uint');
-    return parseInt(s.slice(start, this.pos), 10);
+    return v;
   }
 
   parseFloat(): number {
@@ -633,23 +660,36 @@ class Decoder {
 
   parseQuotedString(): string {
     this.pos++; // skip opening '"'
-    let out = '';
     const s = this.src;
+    const start = this.pos;
+    // Fast path: scan for closing " with no escape
+    let scan = this.pos;
+    while (scan < s.length && s[scan] !== '"' && s[scan] !== '\\') scan++;
+    if (scan < s.length && s[scan] === '"') {
+      this.pos = scan + 1;
+      return s.slice(start, scan);
+    }
+    // Slow path: has escapes — collect segments
+    const parts: string[] = [];
+    if (scan > start) parts.push(s.slice(start, scan));
+    this.pos = scan;
     while (this.pos < s.length) {
       const c = s[this.pos];
       if (c === '"') { this.pos++; break; }
       if (c === '\\') {
         this.pos++;
         const e = s[this.pos++];
-        if (e === 'n') out += '\n';
-        else if (e === 't') out += '\t';
-        else out += e;
+        if (e === 'n') parts.push('\n');
+        else if (e === 't') parts.push('\t');
+        else parts.push(e);
       } else {
-        out += c;
-        this.pos++;
+        // Batch non-escape run
+        const rs = this.pos;
+        while (this.pos < s.length && s[this.pos] !== '"' && s[this.pos] !== '\\') this.pos++;
+        parts.push(s.slice(rs, this.pos));
       }
     }
-    return out;
+    return parts.join('');
   }
 }
 
@@ -682,47 +722,97 @@ function unescapePlain(s: string): string {
 const encoder = new TextEncoder();
 const decoder_utf8 = new TextDecoder();
 
-// Write helpers
-function writeI64LE(buf: number[], v: number | bigint): void {
-  const big = typeof v === 'bigint' ? v : BigInt(Math.trunc(Number(v)));
-  const lo = Number(big & 0xFFFFFFFFn);
-  const hi = Number((big >> 32n) & 0xFFFFFFFFn);
-  buf.push(
-    lo & 0xFF, (lo >> 8) & 0xFF, (lo >> 16) & 0xFF, (lo >> 24) & 0xFF,
-    hi & 0xFF, (hi >> 8) & 0xFF, (hi >> 16) & 0xFF, (hi >> 24) & 0xFF,
-  );
+// Reusable ArrayBuffer + DataView for float encoding (avoids per-float allocation)
+const _f64Buf = new ArrayBuffer(8);
+const _f64View = new DataView(_f64Buf);
+const _f64Bytes = new Uint8Array(_f64Buf);
+
+// Growable binary buffer — avoids number[] + per-element push
+class BinWriter {
+  buf: Uint8Array;
+  len: number;
+  constructor(cap: number) {
+    this.buf = new Uint8Array(cap);
+    this.len = 0;
+  }
+  private grow(need: number): void {
+    if (this.len + need <= this.buf.length) return;
+    let nc = this.buf.length;
+    while (nc < this.len + need) nc = nc * 2;
+    const nb = new Uint8Array(nc);
+    nb.set(this.buf.subarray(0, this.len));
+    this.buf = nb;
+  }
+  push(b: number): void {
+    if (this.len >= this.buf.length) this.grow(1);
+    this.buf[this.len++] = b;
+  }
+  pushU32LE(v: number): void {
+    this.grow(4);
+    this.buf[this.len++] = v & 0xFF;
+    this.buf[this.len++] = (v >> 8) & 0xFF;
+    this.buf[this.len++] = (v >> 16) & 0xFF;
+    this.buf[this.len++] = (v >> 24) & 0xFF;
+  }
+  pushI64LE(v: number | bigint): void {
+    this.grow(8);
+    if (typeof v === 'number' && v >= -2147483648 && v <= 2147483647) {
+      // Safe 32-bit int fast path — avoid BigInt
+      const iv = v | 0;
+      this.buf[this.len++] = iv & 0xFF;
+      this.buf[this.len++] = (iv >> 8) & 0xFF;
+      this.buf[this.len++] = (iv >> 16) & 0xFF;
+      this.buf[this.len++] = (iv >> 24) & 0xFF;
+      // sign-extend high 4 bytes
+      const sign = iv < 0 ? 0xFF : 0;
+      this.buf[this.len++] = sign;
+      this.buf[this.len++] = sign;
+      this.buf[this.len++] = sign;
+      this.buf[this.len++] = sign;
+      return;
+    }
+    const big = typeof v === 'bigint' ? v : BigInt(Math.trunc(Number(v)));
+    const lo = Number(big & 0xFFFFFFFFn);
+    const hi = Number((big >> 32n) & 0xFFFFFFFFn);
+    this.buf[this.len++] = lo & 0xFF;
+    this.buf[this.len++] = (lo >> 8) & 0xFF;
+    this.buf[this.len++] = (lo >> 16) & 0xFF;
+    this.buf[this.len++] = (lo >> 24) & 0xFF;
+    this.buf[this.len++] = hi & 0xFF;
+    this.buf[this.len++] = (hi >> 8) & 0xFF;
+    this.buf[this.len++] = (hi >> 16) & 0xFF;
+    this.buf[this.len++] = (hi >> 24) & 0xFF;
+  }
+  pushF64LE(v: number): void {
+    this.grow(8);
+    _f64View.setFloat64(0, v, true);
+    this.buf.set(_f64Bytes, this.len);
+    this.len += 8;
+  }
+  pushBytes(data: Uint8Array): void {
+    this.grow(data.length);
+    this.buf.set(data, this.len);
+    this.len += data.length;
+  }
+  finish(): Uint8Array {
+    return this.buf.slice(0, this.len);
+  }
 }
 
-function writeU64LE(buf: number[], v: number | bigint): void {
-  const big = typeof v === 'bigint' ? v : BigInt(Math.trunc(Number(v)));
-  writeI64LE(buf, big); // same bit pattern
-}
-
-function writeF64LE(buf: number[], v: number): void {
-  const tmp = new ArrayBuffer(8);
-  const dv = new DataView(tmp);
-  dv.setFloat64(0, v, true);
-  for (let i = 0; i < 8; i++) buf.push(dv.getUint8(i));
-}
-
-function writeU32LE(buf: number[], v: number): void {
-  buf.push(v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF, (v >> 24) & 0xFF);
-}
-
-function writeBinValue(buf: number[], val: unknown, f: Field): void {
+function writeBinValueW(w: BinWriter, val: unknown, f: Field): void {
   if (f.optional) {
-    if (val === null || val === undefined) { buf.push(0); return; }
-    buf.push(1);
+    if (val === null || val === undefined) { w.push(0); return; }
+    w.push(1);
   }
   switch (f.base) {
-    case 'bool':  buf.push(val ? 1 : 0); break;
-    case 'int':   writeI64LE(buf, val as number | bigint); break;
-    case 'uint':  writeU64LE(buf, val as number | bigint); break;
-    case 'float': writeF64LE(buf, Number(val)); break;
+    case 'bool':  w.push(val ? 1 : 0); break;
+    case 'int':   w.pushI64LE(val as number | bigint); break;
+    case 'uint':  w.pushI64LE(val as number | bigint); break;
+    case 'float': w.pushF64LE(Number(val)); break;
     case 'str': {
       const bytes = encoder.encode(String(val));
-      writeU32LE(buf, bytes.length);
-      for (const b of bytes) buf.push(b);
+      w.pushU32LE(bytes.length);
+      w.pushBytes(bytes);
       break;
     }
   }
@@ -730,18 +820,19 @@ function writeBinValue(buf: number[], val: unknown, f: Field): void {
 
 export function encodeBinary(obj: AsonResult, schema: string): Uint8Array {
   const { fields, isSlice } = parseSchema(schema);
-  const buf: number[] = [];
+  const rows = Array.isArray(obj) ? obj.length : 1;
+  const w = new BinWriter(rows * fields.length * 16 + 16);
 
   if (Array.isArray(obj)) {
-    writeU32LE(buf, obj.length);
+    w.pushU32LE(obj.length);
     for (const row of obj) {
-      for (const f of fields) writeBinValue(buf, row[f.name], f);
+      for (const f of fields) writeBinValueW(w, row[f.name], f);
     }
   } else {
-    for (const f of fields) writeBinValue(buf, (obj as AsonObj)[f.name], f);
+    for (const f of fields) writeBinValueW(w, (obj as AsonObj)[f.name], f);
   }
 
-  return new Uint8Array(buf);
+  return w.finish();
 }
 
 // Read helpers
