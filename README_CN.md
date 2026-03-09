@@ -236,3 +236,17 @@ ASON JS 产生的输出比 JSON **小 50–55%**。由于 `JSON.parse` / `JSON.s
 ## 许可证
 
 MIT
+
+## Contributors
+
+- [Athan](https://github.com/athxx)
+
+## Latest Benchmarks
+
+在当前机器上使用 Node `24.14.0` 实测：
+
+- 扁平 1,000 条记录：ASON 文本 `58,539 B`，JSON `121,451 B`，缩小 `51.8%`
+- 扁平 5,000 条记录：ASON 序列化 `8.93ms`，JSON `13.27ms`；但反序列化 ASON `20.10ms`，JSON `16.92ms`
+- 大载荷 10,000 条记录：ASON 序列化 `37.86ms`，JSON `20.23ms`；反序列化 ASON `37.25ms`，JSON `33.82ms`
+- 这轮测试中 JS 版的主要优势仍然是体积和 token 节省，不是全面压过原生 JSON 的绝对速度
+- 二进制路径更偏向传输和解码场景：1,000 条记录时 BIN 体积 `72,784 B`，JSON `121,451 B`

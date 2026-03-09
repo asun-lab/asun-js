@@ -225,3 +225,19 @@ For latency-sensitive hot paths, use the [Rust](../ason-rs/) or [Go](../ason-go/
 ## License
 
 MIT
+
+## Contributors
+
+- [Athan](https://github.com/athxx)
+
+## Latest Benchmarks
+
+Measured on this machine with Node `24.14.0`.
+
+Headline numbers:
+
+- Flat 1,000-record dataset: ASON text `58,539 B` vs JSON `121,451 B` (`51.8%` smaller)
+- Flat 5,000-record dataset: ASON serialize `8.93ms` vs JSON `13.27ms`, but deserialize `20.10ms` vs JSON `16.92ms`
+- Large 10,000-record dataset: ASON serialize `37.86ms` vs JSON `20.23ms`, deserialize `37.25ms` vs JSON `33.82ms`
+- Throughput summary on 10,000-record-style text path: ASON text serialize ran at `0.30 M records/s` vs JSON `0.75 M`-class baseline, and deserialize was roughly at parity in this run
+- Binary path is mainly useful for decode and transport size here: on 1,000 records, BIN deserialize `4.68ms` vs JSON `2.08ms`, with payload `72,784 B` vs JSON `121,451 B`
