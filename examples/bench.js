@@ -60,6 +60,23 @@ function makeAllTypes(n) {
   }));
 }
 
+function makeMapTypes(n) {
+  return Array.from({ length: n }, (_, i) => ({
+    id: i,
+    name: `MapUser${i}`,
+    attributes: {
+      role: i % 2 === 0 ? 'admin' : 'viewer',
+      status: 'active',
+      logins: i * 5,
+      score: i * 1.5,
+      flags: {
+         verified: true,
+         premium: i % 3 === 0
+      }
+    }
+  }));
+}
+
 // Schema strings used only for decodeBinary (binary decode requires explicit schema)
 const FLAT_SCHEMA_BIN = '[{id:int, name:str, email:str, score:float, active:bool, dept:str, age:int, salary:int}]';
 const ALL_SCHEMA_BIN  = '[{b:bool, n:int, u:uint, f:float, s:str, on:int?, of:float?}]';
@@ -243,6 +260,30 @@ console.log('\n=== Section 7: Binary throughput summary ===\n');
 
   console.log(`  Binary serialize:   ${(binSerRps / 1e6).toFixed(2)} M records/s`);
   console.log(`  Binary deserialize: ${(binDeRps / 1e6).toFixed(2)} M records/s`);
+}
+
+// ---------------------------------------------------------------------------
+// Section 8: Map throughput summary (typed text)
+// ---------------------------------------------------------------------------
+console.log('\n=== Section 8: Map throughput summary (typed text) ===\n');
+{
+  const n     = 1000;
+  const rows  = makeMapTypes(n);
+  const text  = encodeTyped(rows);
+  const iters = 100;
+
+  const serNs  = bench(() => encodeTyped(rows), iters);
+  const deNs   = bench(() => decode(text), iters);
+  const jsonSer = bench(() => JSON.stringify(rows), iters);
+  const jsonDeNs = bench(() => JSON.parse(JSON.stringify(rows)), iters);
+
+  const serRps     = Math.round(n / (serNs / 1e9));
+  const deRps      = Math.round(n / (deNs / 1e9));
+  const jsonSerRps = Math.round(n / (jsonSer / 1e9));
+  const jsonDeRps  = Math.round(n / (jsonDeNs / 1e9));
+
+  console.log(`  Serialize:   ${(serRps / 1e6).toFixed(2)} M records/s  (${(serRps / jsonSerRps).toFixed(2)}× vs JSON)`);
+  console.log(`  Deserialize: ${(deRps / 1e6).toFixed(2)} M records/s  (${(deRps / jsonDeRps).toFixed(2)}× vs JSON)`);
 }
 
 console.log('\n' + '='.repeat(50));

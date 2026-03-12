@@ -105,7 +105,12 @@ describe('type inference', () => {
   it('null value → str? (optional str)', () => {
     expect(encodeTyped({ tag: null })).toContain('tag:str?');
   });
+
+  it('object value → map (<str:str>)', () => {
+    expect(encodeTyped({ meta: { role: 'admin' } })).toContain('meta:<str:str>');
+  });
 });
+
 
 // ---------------------------------------------------------------------------
 // 4. String escaping (works with both encode and encodeTyped)
@@ -242,6 +247,23 @@ describe('encodeBinary / decodeBinary', () => {
     const fromBin = decodeBinary(encodeBinary(rows), schema);
     expect(fromBin).toEqual(fromText);
   });
+
+  it('roundtrips a simple binary map field', () => {
+    const obj = { name: 'Alice', attrs: { age: 30, score: 95 } };
+    const schema = '{name:str, attrs:<str:int>}';
+    expect(decodeBinary(encodeBinary(obj), schema)).toEqual(obj);
+  });
+
+  it('roundtrips binary map with complex array-of-struct values', () => {
+    const obj = {
+      groups: {
+        teamA: [{ name: 'Alice', age: 30 }, { name: 'Bob', age: 28 }],
+        teamB: [{ name: 'Carol', age: 41 }]
+      }
+    };
+    const schema = '{groups:<str:[{name:str,age:int}]>}';
+    expect(decodeBinary(encodeBinary(obj), schema)).toEqual(obj);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -350,5 +372,69 @@ describe('field names with special characters', () => {
   it('encodeTyped + decode roundtrip with special names', () => {
     const obj = { user_name: 'Alice', is_active: true };
     expect(decode(encodeTyped(obj))).toEqual(obj);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 13. Map / Dictionary support <K:V>
+// ---------------------------------------------------------------------------
+
+describe('map <K:V> format', () => {
+  it('decodes a simple map', () => {
+    const text = '{name:str, attrs:<str:int>}:(Alice, <age:30, score:95>)';
+    const out = decode(text) as any;
+    expect(out.name).toBe('Alice');
+    expect(out.attrs.age).toBe(30);
+    expect(out.attrs.score).toBe(95);
+  });
+
+  it('encodes a simple map correctly', () => {
+    const obj = { name: 'Alice', attrs: { age: 30, score: 95 } };
+    const text = encodeTyped(obj);
+    expect(text).toContain('attrs:<str:int>');
+    expect(text).toContain('<age: 30, score: 95>');
+  });
+
+  it('roundtrips a complex nested map', () => {
+    const obj = {
+      id: 1,
+      meta: {
+        role: 'admin',
+        active: true,
+        stats: { logins: 42, score: 9.9 }
+      }
+    };
+    const encoded = encodeTyped(obj);
+    expect(encoded).toContain('meta:<str:str>');
+    const decoded = decode(encoded) as any;
+    expect(decoded.id).toBe(1);
+    expect(decoded.meta.role).toBe('admin');
+    expect(decoded.meta.active).toBe(true);
+    // map encodes nested objects too
+    expect(decoded.meta.stats.logins).toBe(42);
+    expect(decoded.meta.stats.score).toBe(9.9);
+  });
+
+  it('decodes typed map with complex array-of-struct values', () => {
+    const text = '{groups:<str:[{name:str,age:int}]>}:(<teamA:[(Alice,30),(Bob,28)],teamB:[(Carol,41)]>)';
+    const out = decode(text) as any;
+    expect(out.groups.teamA).toEqual([
+      { name: 'Alice', age: 30 },
+      { name: 'Bob', age: 28 }
+    ]);
+    expect(out.groups.teamB).toEqual([{ name: 'Carol', age: 41 }]);
+  });
+
+  it('roundtrips homogeneous complex map values with typed header', () => {
+    const obj = {
+      groups: {
+        teamA: [{ name: 'Alice', age: 30 }, { name: 'Bob', age: 28 }],
+        teamB: [{ name: 'Carol', age: 41 }]
+      }
+    };
+    const encoded = encodeTyped(obj);
+    expect(encoded).toContain('groups:<str:[{name:str,age:int}]>');
+    const decoded = decode(encoded) as any;
+    expect(decoded.groups.teamA[0]).toEqual({ name: 'Alice', age: 30 });
   });
 });
