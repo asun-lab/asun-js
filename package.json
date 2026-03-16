@@ -14,7 +14,9 @@
       "require": "./dist/index.cjs"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "publishConfig": {
     "access": "public"
   },
@@ -38,6 +40,12 @@
   "bugs": {
     "url": "https://github.com/ason-lab/ason-js/issues"
   },
-  "keywords": ["ason", "serialization", "schema", "llm", "data-format"],
+  "keywords": [
+    "ason",
+    "serialization",
+    "schema",
+    "llm",
+    "data-format"
+  ],
   "sideEffects": false
 }
