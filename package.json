@@ -1,6 +1,6 @@
 {
   "name": "@athanx/asun",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "ASUN (Array-Schema Unified Notation) – high-performance, schema-driven data format for JS/TS",
   "license": "MIT",
   "type": "module",
@@ -33,12 +33,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/asun-lab/asun-js.git",
+    "url": "git+https://github.com/asunLab/asun-js.git",
     "directory": "asun-js"
   },
-  "homepage": "https://github.com/asun-lab/asun-js#readme",
+  "homepage": "https://github.com/asunLab/asun-js#readme",
   "bugs": {
-    "url": "https://github.com/asun-lab/asun-js/issues"
+    "url": "https://github.com/asunLab/asun-js/issues"
   },
   "keywords": [
     "asun",

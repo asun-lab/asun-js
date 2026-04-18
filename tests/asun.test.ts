@@ -65,13 +65,13 @@ describe('text roundtrip', () => {
     expect(decode(encodeTyped(rows))).toEqual(rows);
   });
 
-  it('roundtrips untyped nested data with string scalars', () => {
+  it('roundtrips untyped nested data with auto-detected scalars', () => {
     const text = encode({
       profile: { host: '127.0.0.1', port: 8080 },
       tags: ['blue', 'fast'],
     });
     expect(decode(text)).toEqual({
-      profile: { host: '127.0.0.1', port: '8080' },
+      profile: { host: '127.0.0.1', port: 8080 },
       tags: ['blue', 'fast'],
     });
   });
@@ -211,8 +211,8 @@ describe('scale sanity', () => {
 describe('quoted schema field names', () => {
   it('roundtrips across encode variants', () => {
     const row = { 'id uuid': 1, '65': 'Alice', '{}[]@"': true };
-    expect(decode(encode(row))).toEqual({ 'id uuid': '1', '65': 'Alice', '{}[]@"': 'true' });
-    expect(decode(encodePretty(row))).toEqual({ 'id uuid': '1', '65': 'Alice', '{}[]@"': 'true' });
+    expect(decode(encode(row))).toEqual(row);
+    expect(decode(encodePretty(row))).toEqual(row);
     expect(decode(encodeTyped(row))).toEqual(row);
     expect(decode(encodePrettyTyped(row))).toEqual(row);
   });

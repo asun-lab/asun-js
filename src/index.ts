@@ -21,7 +21,7 @@
 export type AsunObj = Record<string, unknown>;
 export type AsunResult = AsunObj | AsunObj[];
 
-type BaseType = "int" | "uint" | "float" | "bool" | "str" | "list" | "struct";
+type BaseType = "int" | "uint" | "float" | "bool" | "str" | "list" | "struct" | "auto";
 
 interface Field {
   name: string;
@@ -64,6 +64,7 @@ function inferBaseType(val: unknown): BaseType {
 }
 
 function baseTypeFromExpr(typeExpr: string): BaseType {
+  if (typeExpr === "auto") return "auto";
   if (typeExpr.startsWith("[")) return "list";
   if (typeExpr.startsWith("{")) return "struct";
   if (
@@ -248,7 +249,7 @@ function scanStructSchema(
     }
 
     skip();
-    let typeExpr = "str";
+    let typeExpr = "auto";
     if (pos < n && src[pos] === ":") {
       throw new AsunError(
         `legacy ':' type annotations are not supported; use '@'`,
@@ -520,6 +521,10 @@ function encodeByTypeExpr(
   if (isOptional && (val === null || val === undefined)) return "";
 
   switch (baseTypeFromExpr(inner)) {
+    case "auto": {
+      const base = inferBaseType(val);
+      return encodeByTypeExpr(val, base, isOptional);
+    }
     case "bool":
       return val ? "true" : "false";
     case "int":
@@ -939,6 +944,8 @@ class Decoder {
       return null;
 
     switch (baseTypeFromExpr(inner)) {
+      case "auto":
+        return this.parseGenericValue();
       case "bool":
         return this.parseBool();
       case "int":
@@ -1310,6 +1317,11 @@ function writeBinByTypeExpr(
   }
 
   switch (baseTypeFromExpr(inner)) {
+    case "auto": {
+      const base = inferBaseType(value);
+      writeBinByTypeExpr(writer, value, base, isOptional);
+      break;
+    }
     case "bool":
       writer.push(value ? 1 : 0);
       break;
@@ -1411,6 +1423,8 @@ class BinDecoder {
     }
 
     switch (baseTypeFromExpr(inner)) {
+      case "auto":
+        return this.readByTypeExpr("str", isOptional);
       case "bool":
         return this.view.getUint8(this.pos++) !== 0;
       case "int": {
