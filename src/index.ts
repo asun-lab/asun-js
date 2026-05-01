@@ -35,8 +35,9 @@ interface ParsedSchema {
 }
 
 const NEEDS_QUOTE = new Uint8Array(256);
-for (let i = 0; i < 32; i++) NEEDS_QUOTE[i] = 1;
-for (const ch of [",", "@", "(", ")", "[", "]", '"', "\\"]) {
+for (let i = 0; i < 33; i++) NEEDS_QUOTE[i] = 1; // 0x00..=0x1f and 0x20
+NEEDS_QUOTE[0x7f] = 1;
+for (const ch of [",", "@", "(", ")", "[", "]", "{", "}", ":", "<", ">", "/", "*", '"', "\\"]) {
   NEEDS_QUOTE[ch.charCodeAt(0)] = 1;
 }
 
@@ -51,6 +52,24 @@ const _schemaCache = new Map<string, ParsedSchema>();
 
 function isPlainObject(value: unknown): value is AsunObj {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// ASCII-only trim — preserves Unicode characters like U+FEFF (BOM) that
+// String.prototype.trim() would strip as Unicode whitespace.
+function trimAsciiWs(s: string): string {
+  let lo = 0;
+  let hi = s.length;
+  while (lo < hi) {
+    const c = s.charCodeAt(lo);
+    if (c === 0x20 || c === 0x09 || c === 0x0A || c === 0x0D) lo++;
+    else break;
+  }
+  while (hi > lo) {
+    const c = s.charCodeAt(hi - 1);
+    if (c === 0x20 || c === 0x09 || c === 0x0A || c === 0x0D) hi--;
+    else break;
+  }
+  return lo === 0 && hi === s.length ? s : s.slice(lo, hi);
 }
 
 function inferBaseType(val: unknown): BaseType {
@@ -402,18 +421,26 @@ function buildHeader(
 
 function needsQuoting(s: string): boolean {
   if (s.length === 0) return true;
-  if (s.length <= 5 && (s === "true" || s === "false")) return true;
-  if (s[0] === " " || s[s.length - 1] === " ") return true;
-  let couldBeNum = true;
-  const numStart = s[0] === "-" ? 1 : 0;
-  if (numStart >= s.length) couldBeNum = false;
+  if (s === "true" || s === "false" || s === "True" || s === "False" || s === "TRUE" || s === "FALSE") return true;
+  const c0 = s.charCodeAt(0);
+  const cN = s.charCodeAt(s.length - 1);
+  // Leading/trailing ASCII whitespace forces quoting (SPEC §S2 trim).
+  if (c0 === 0x20 || c0 === 0x09 || c0 === 0x0A || c0 === 0x0D) return true;
+  if (cN === 0x20 || cN === 0x09 || cN === 0x0A || cN === 0x0D) return true;
   for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i);
-    if (NEEDS_QUOTE[c]) return true;
-    if (couldBeNum && i >= numStart && !((c >= 48 && c <= 57) || c === 46))
-      couldBeNum = false;
+    if (NEEDS_QUOTE[s.charCodeAt(i)]) return true;
   }
-  return couldBeNum && s.length > numStart;
+  // Number-like prefix forces quoting.
+  if (c0 >= 0x30 && c0 <= 0x39) return true;
+  if ((c0 === 0x2d || c0 === 0x2b) && s.length >= 2) {
+    const c1 = s.charCodeAt(1);
+    if (c1 >= 0x30 && c1 <= 0x39) return true;
+  }
+  if (c0 === 0x2e && s.length >= 2) {
+    const c1 = s.charCodeAt(1);
+    if (c1 >= 0x30 && c1 <= 0x39) return true;
+  }
+  return false;
 }
 
 function needsQuotedSchemaFieldName(name: string): boolean {
@@ -460,6 +487,7 @@ function quoteStr(s: string): string {
   const parts: string[] = ['"'];
   for (let i = 0; i < s.length; i++) {
     const c = s[i]!;
+    const cc = s.charCodeAt(i);
     if (c === '"') parts.push('\\"');
     else if (c === "\\") parts.push("\\\\");
     else if (c === "\n") parts.push("\\n");
@@ -467,6 +495,8 @@ function quoteStr(s: string): string {
     else if (c === "\t") parts.push("\\t");
     else if (c === "\b") parts.push("\\b");
     else if (c === "\f") parts.push("\\f");
+    else if (cc < 0x20 || cc === 0x7f)
+      parts.push("\\u00" + cc.toString(16).padStart(2, "0"));
     else parts.push(c);
   }
   parts.push('"');
@@ -480,9 +510,11 @@ function encodeStr(s: string): string {
 function formatFloat(v: number): string {
   if (!isFinite(v)) return "0";
   if (Object.is(v, -0)) return "0";
-  if (Number.isInteger(v)) return v.toFixed(1);
-  let s = v.toPrecision(15).replace(/\.?0+$/, "");
-  if (!s.includes(".")) s += ".0";
+  if (Number.isInteger(v) && Math.abs(v) < 1e21) return v.toFixed(1);
+  // Default JS formatting handles scientific notation for very large/small
+  // magnitudes and is round-trippable via Number.parseFloat.
+  let s = String(v);
+  if (!/[.eE]/.test(s)) s += ".0";
   return s;
 }
 
@@ -547,7 +579,42 @@ function encodeTuple(obj: AsunObj, fields: Field[]): string {
   return `${out})`;
 }
 
+// Untyped value encoder: scalar / null / plain array (without struct items).
+function encodeUntyped(val: unknown): string {
+  if (val === null || val === undefined) return "()";
+  if (typeof val === "boolean") return val ? "true" : "false";
+  if (typeof val === "number") {
+    if (Number.isInteger(val)) return String(val);
+    return formatFloat(val);
+  }
+  if (typeof val === "bigint") return String(val);
+  if (typeof val === "string") return encodeStr(val);
+  if (Array.isArray(val)) {
+    return `[${val.map((item) => encodeUntyped(item)).join(",")}]`;
+  }
+  // Fallback: stringify
+  return encodeStr(String(val));
+}
+
+function isPlainObjectArray(val: unknown): boolean {
+  if (!Array.isArray(val)) return false;
+  if (val.length === 0) return false;
+  return isPlainObject(val[0]);
+}
+
 export function encode(obj: AsunResult): string {
+  // Untyped fallback for scalars / nulls / plain arrays / strings.
+  if (
+    obj === null ||
+    obj === undefined ||
+    typeof obj === "boolean" ||
+    typeof obj === "number" ||
+    typeof obj === "bigint" ||
+    typeof obj === "string" ||
+    (Array.isArray(obj) && !isPlainObjectArray(obj))
+  ) {
+    return encodeUntyped(obj);
+  }
   if (Array.isArray(obj)) {
     if (obj.length === 0) return "[{}]:\n";
     const fields = inferFields(obj[0]!);
@@ -854,6 +921,32 @@ class Decoder {
     this.skip();
     const isSlice =
       this.src[this.pos] === "[" && this.src[this.pos + 1] === "{";
+    const isStruct = this.src[this.pos] === "{";
+
+    // SPEC §8.3 untyped top level: `[...]` plain array, or bare value.
+    // Top-level `(...)` is not allowed, except `()` is the untyped null marker.
+    if (!isSlice && !isStruct) {
+      if (this.pos >= this.src.length) this.err(`empty input`);
+      if (this.src[this.pos] === "(") {
+        if (this.src[this.pos + 1] === ")") {
+          this.pos += 2;
+          this.skip();
+          if (this.pos < this.src.length)
+            this.err(`trailing content after decoded value`);
+          return null as unknown as AsunResult;
+        }
+        this.err(`bare tuple at top level — schema required`);
+      }
+      const out =
+        this.src[this.pos] === "["
+          ? this.parseList()
+          : this.parseGenericValue();
+      this.skip();
+      if (this.pos < this.src.length)
+        this.err(`trailing content after decoded value`);
+      return out as AsunResult;
+    }
+
     if (isSlice) this.pos++;
 
     if (this.src[this.pos] !== "{") this.err(`expected '{'`);
@@ -967,13 +1060,20 @@ class Decoder {
     if (c === '"') return this.parseQuotedString();
     if (c === "<") this.err(`unsupported value syntax`);
     if (c === "[") return this.parseList();
-    if (c === "(") return this.parseGenericTuple();
+    if (c === "(") {
+      // `()` is the untyped null marker.
+      if (this.src[this.pos + 1] === ")") {
+        this.pos += 2;
+        return null;
+      }
+      return this.parseGenericTuple();
+    }
     if (
       this.src.startsWith("true", this.pos) ||
       this.src.startsWith("false", this.pos)
     )
       return this.parseBool();
-    const token = this.parsePlainToken([",", ")", "]"]).trim();
+    const token = trimAsciiWs(this.parsePlainToken([",", ")", "]"]));
     if (token === "") return null;
     const scalar = parseScalarToken(token);
     if (scalar !== undefined) return scalar;
@@ -1134,7 +1234,7 @@ class Decoder {
       if (this.src[this.pos] === "\\") this.pos += 2;
       else this.pos++;
     }
-    const raw = this.src.slice(start, this.pos).trim();
+    const raw = trimAsciiWs(this.src.slice(start, this.pos));
     if (raw === "") return "";
     return raw.includes("\\") ? unescapePlain(raw) : raw;
   }
@@ -1152,6 +1252,13 @@ class Decoder {
         else if (esc === "t") parts.push("\t");
         else if (esc === "b") parts.push("\b");
         else if (esc === "f") parts.push("\f");
+        else if (esc === "u") {
+          const hex = this.src.slice(this.pos, this.pos + 4);
+          if (hex.length < 4 || !/^[0-9a-fA-F]{4}$/.test(hex))
+            this.err(`invalid unicode escape`);
+          parts.push(String.fromCharCode(parseInt(hex, 16)));
+          this.pos += 4;
+        }
         else parts.push(esc);
       } else {
         parts.push(c);
@@ -1167,24 +1274,57 @@ function parseScalarToken(
   if (token === "true") return true;
   if (token === "false") return false;
 
+  // ABNF: number = ["-"] 1*DIGIT [ "." 1*DIGIT ] [ ("e"/"E") ["+"/"-"] 1*DIGIT ]
+  // Leading "+" is forbidden; both fractional and exponent parts (if present)
+  // require at least one digit.
   let i = 0;
   if (token[0] === "-") i = 1;
-  let seenDigit = false;
-  let seenDot = false;
-  for (; i < token.length; i++) {
+
+  // Integer part — must have ≥1 digit.
+  const intStart = i;
+  while (i < token.length) {
     const c = token.charCodeAt(i);
-    if (c >= 48 && c <= 57) {
-      seenDigit = true;
-      continue;
-    }
-    if (c === 46 && !seenDot) {
-      seenDot = true;
-      continue;
-    }
-    return undefined;
+    if (c < 48 || c > 57) break;
+    i++;
   }
-  if (!seenDigit) return undefined;
-  return seenDot ? Number.parseFloat(token) : Number.parseInt(token, 10);
+  if (i === intStart) return undefined;
+
+  let seenDot = false;
+  let seenExp = false;
+
+  if (i < token.length && token.charCodeAt(i) === 46) {
+    i++;
+    const fracStart = i;
+    while (i < token.length) {
+      const c = token.charCodeAt(i);
+      if (c < 48 || c > 57) break;
+      i++;
+    }
+    if (i === fracStart) return undefined;
+    seenDot = true;
+  }
+
+  if (i < token.length) {
+    const c = token.charCodeAt(i);
+    if (c === 0x65 || c === 0x45) {
+      i++;
+      if (i < token.length) {
+        const sign = token.charCodeAt(i);
+        if (sign === 0x2b || sign === 0x2d) i++;
+      }
+      const expStart = i;
+      while (i < token.length) {
+        const cd = token.charCodeAt(i);
+        if (cd < 48 || cd > 57) break;
+        i++;
+      }
+      if (i === expStart) return undefined;
+      seenExp = true;
+    }
+  }
+
+  if (i !== token.length) return undefined;
+  return seenDot || seenExp ? Number.parseFloat(token) : Number.parseInt(token, 10);
 }
 
 function unescapePlain(s: string): string {
@@ -1198,6 +1338,15 @@ function unescapePlain(s: string): string {
       else if (c === "t") out += "\t";
       else if (c === "b") out += "\b";
       else if (c === "f") out += "\f";
+      else if (c === "u") {
+        const hex = s.slice(i + 1, i + 5);
+        if (hex.length === 4 && /^[0-9a-fA-F]{4}$/.test(hex)) {
+          out += String.fromCharCode(parseInt(hex, 16));
+          i += 4;
+        } else {
+          out += c;
+        }
+      }
       else out += c;
     } else {
       out += s[i]!;
